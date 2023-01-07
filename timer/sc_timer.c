@@ -38,7 +38,7 @@
 #define WHEEL_COUNT 16u
 
 #ifndef SC_TIMER_MAX
-#define SC_TIMER_MAX (UINT32_MAX / sizeof(struct sc_timer_data)) / WHEEL_COUNT
+#define SC_TIMER_MAX ((UINT32_MAX / sizeof(struct sc_timer_data)) / WHEEL_COUNT)
 #endif
 
 void sc_timer_init(struct sc_timer *t, uint64_t timestamp)
@@ -153,7 +153,7 @@ void sc_timer_cancel(struct sc_timer *t, uint64_t *id)
 		return;
 	}
 
-	pos = (((uint32_t) *id) * t->wheel) + (*id >> 32u);
+	pos = (uint64_t) (((uint32_t) *id) * t->wheel) + (*id >> 32u);
 
 	t->list[pos].timeout = SC_TIMER_INVALID;
 	*id = SC_TIMER_INVALID;
@@ -165,7 +165,8 @@ uint64_t sc_timer_timeout(struct sc_timer *t, uint64_t timestamp, void *arg,
 			  void (*callback)(void *, uint64_t, uint64_t, void *))
 {
 	const uint64_t time = timestamp - t->timestamp;
-	uint32_t wheel, base, timeout;
+	uint64_t timeout;
+	uint32_t wheel, base;
 	uint32_t head = t->head;
 	uint32_t wheels = (uint32_t) (sc_timer_min(time / TICK, WHEEL_COUNT));
 	struct sc_timer_data *item;
@@ -191,7 +192,7 @@ uint64_t sc_timer_timeout(struct sc_timer *t, uint64_t timestamp, void *arg,
 				callback(arg, timeout, item->type, item->data);
 
 				// Recalculates position each time because there
-				// might be newly added timers in the callback
+				// might be newly added timers in the callback,
 				// and it might require expansion of the list.
 				base = t->wheel * head;
 			}

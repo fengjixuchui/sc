@@ -472,7 +472,7 @@ static void sc_signal_on_fatal(int sig, siginfo_t *info, void *context)
 #endif
 }
 
-int sc_signal_init()
+int sc_signal_init(void)
 {
 	bool rc = true;
 	struct sigaction action;
@@ -521,6 +521,6 @@ void sc_signal_log(int fd, char *buf, size_t sz, char *fmt, ...)
 	wr = sc_signal_vsnprintf(buf, sz, fmt, args);
 	va_end(args);
 
-	rc = write(fd, buf, (size_t) wr);
+	rc = (int) write(fd, buf, (size_t) wr);
 	(void) rc;
 }

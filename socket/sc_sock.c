@@ -46,10 +46,14 @@
 #define SC_SIZE_MAX INT32_MAX
 #endif
 
+#ifndef SC_SOCK_POLL_MAX_EVENTS
+#define SC_SOCK_POLL_MAX_EVENTS 1024
+#endif
+
 #if defined(_WIN32) || defined(_WIN64)
 #include <afunix.h>
 #include <assert.h>
-#include <Ws2tcpip.h>
+#include <ws2tcpip.h>
 
 #pragma warning(disable : 4996)
 #define sc_close(n) closesocket(n)
@@ -84,7 +88,7 @@ static void sc_sock_errstr(struct sc_sock *s, int gai_err)
 
 int sc_sock_set_blocking(struct sc_sock *s, bool blocking)
 {
-	int mode = blocking ? 0 : 1;
+	u_long mode = blocking ? 0 : 1;
 	int rc = ioctlsocket(s->fdt.fd, FIONBIO, &mode);
 
 	return rc == 0 ? 0 : -1;
@@ -183,24 +187,24 @@ int sc_sock_notify_systemd(const char *msg)
 		msghdr.msg_namelen = sizeof(struct sockaddr_un);
 	}
 
-	rc = sendmsg(fd, &msghdr, MSG_NOSIGNAL);
+	rc = (int) sendmsg(fd, &msghdr, MSG_NOSIGNAL);
 
 	close(fd);
 
 	return rc < 0 ? -1 : 0;
 }
 
-int sc_sock_startup()
+int sc_sock_startup(void)
 {
 	return 0;
 }
 
-int sc_sock_cleanup()
+int sc_sock_cleanup(void)
 {
 	return 0;
 }
 
-static int sc_sock_err()
+static int sc_sock_err(void)
 {
 	return errno;
 }
@@ -230,14 +234,16 @@ int sc_sock_set_blocking(struct sc_sock *s, bool blocking)
 
 void sc_sock_init(struct sc_sock *s, int type, bool blocking, int family)
 {
-	s->fdt.fd = -1;
-	s->fdt.type = type;
-	s->fdt.op = SC_SOCK_NONE;
-	s->fdt.index = -1;
-	s->blocking = blocking;
-	s->family = family;
+	*s = (struct sc_sock){
+		.fdt.fd = -1,
+		.fdt.type = type,
+		.blocking = blocking,
+		.family = family
+	};
 
-	memset(s->err, 0, sizeof(s->err));
+#if defined(_WIN32) || defined(_WIN64)
+	s->fdt.op_index = -1;
+#endif
 }
 
 static int sc_sock_close(struct sc_sock *s)
@@ -418,7 +424,11 @@ int sc_sock_finish_connect(struct sc_sock *s)
 	socklen_t len = sizeof(ret);
 
 	rc = getsockopt(s->fdt.fd, SOL_SOCKET, SO_ERROR, (void *) &ret, &len);
-	if (rc != 0 || ret != 0) {
+	if (rc == 0 && ret != 0) {
+		errno = ret;
+		rc = -1;
+	}
+	if (rc != 0) {
 		sc_sock_errstr(s, 0);
 		return -1;
 	}
@@ -506,6 +516,7 @@ int sc_sock_connect(struct sc_sock *s, const char *dst_addr,
 		    const char *dst_port, const char *src_addr,
 		    const char *src_port)
 {
+	int family = s->family;
 	int rc, rv = 0;
 	sc_sock_int fd;
 	void *tmp;
@@ -516,7 +527,7 @@ int sc_sock_connect(struct sc_sock *s, const char *dst_addr,
 		.ai_socktype = SOCK_STREAM,
 	};
 
-	if (s->family == AF_UNIX) {
+	if (family == AF_UNIX) {
 		return sc_sock_connect_unix(s, dst_addr);
 	}
 
@@ -526,52 +537,59 @@ int sc_sock_connect(struct sc_sock *s, const char *dst_addr,
 		return -1;
 	}
 
-	for (p = sinfo; p != NULL; p = p->ai_next) {
-		fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-		if (fd == SC_INVALID) {
-			continue;
-		}
+	for (int i = 0; i < 2; i++) {
+		for (p = sinfo; p != NULL; p = p->ai_next) {
+			// Try same family addresses in the first iteration.
+			if ((i == 0) ^ (p->ai_family == family)) {
+				continue;
+			}
 
-		s->family = p->ai_family;
-		s->fdt.fd = fd;
+			fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+			if (fd == SC_INVALID) {
+				continue;
+			}
 
-		rc = sc_sock_set_blocking(s, s->blocking);
-		if (rc != 0) {
-			goto error;
-		}
+			s->family = p->ai_family;
+			s->fdt.fd = fd;
 
-		tmp = (void *) &(int){1};
-		rc = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, tmp, sizeof(int));
-		if (rc != 0) {
-			goto error;
-		}
-
-		rc = setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, tmp, sizeof(int));
-		if (rc != 0) {
-			goto error;
-		}
-
-		if (src_addr || src_port) {
-			rc = sc_sock_bind_src(s, src_addr, src_port);
+			rc = sc_sock_set_blocking(s, s->blocking);
 			if (rc != 0) {
-				goto bind_error;
-			}
-		}
-
-		rc = connect(s->fdt.fd, p->ai_addr, (socklen_t) p->ai_addrlen);
-		if (rc != 0) {
-			if (!s->blocking && (sc_sock_err() == SC_EINPROGRESS ||
-					     sc_sock_err() == SC_EAGAIN)) {
-				errno = EAGAIN;
-				rv = -1;
-				goto end;
+				goto error;
 			}
 
-			sc_sock_close(s);
-			continue;
-		}
+			tmp = (void *) &(int){1};
+			rc = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, tmp, sizeof(int));
+			if (rc != 0) {
+				goto error;
+			}
 
-		goto end;
+			rc = setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, tmp, sizeof(int));
+			if (rc != 0) {
+				goto error;
+			}
+
+			if (src_addr || src_port) {
+				rc = sc_sock_bind_src(s, src_addr, src_port);
+				if (rc != 0) {
+					goto bind_error;
+				}
+			}
+
+			rc = connect(fd, p->ai_addr, (socklen_t) p->ai_addrlen);
+			if (rc != 0) {
+				if (!s->blocking && (sc_sock_err() == SC_EINPROGRESS ||
+							 sc_sock_err() == SC_EAGAIN)) {
+					errno = EAGAIN;
+					rv = -1;
+					goto end;
+				}
+
+				sc_sock_close(s);
+				continue;
+			}
+
+			goto end;
+		}
 	}
 
 error:
@@ -602,6 +620,13 @@ retry:
 		}
 
 		if (err == SC_EAGAIN) {
+#if defined(_WIN32) || defined(_WIN64)
+			// Stop masking WRITE event.
+			struct sc_sock_poll_data *pd = s->fdt.poll_data;
+			if (pd != NULL && (pd->edge_mask & SC_SOCK_WRITE)) {
+				InterlockedAnd(&pd->edge_mask, ~SC_SOCK_WRITE);
+			}
+#endif
 			errno = EAGAIN;
 			return -1;
 		}
@@ -633,6 +658,13 @@ retry:
 		}
 
 		if (err == SC_EAGAIN) {
+#if defined(_WIN32) || defined(_WIN64)
+			// Stop masking READ event.
+			struct sc_sock_poll_data *pd = s->fdt.poll_data;
+			if (pd != NULL && (pd->edge_mask & SC_SOCK_READ)) {
+				InterlockedAnd(&pd->edge_mask, ~SC_SOCK_READ);
+			}
+#endif
 			errno = EAGAIN;
 			return -1;
 		}
@@ -653,7 +685,11 @@ int sc_sock_accept(struct sc_sock *s, struct sc_sock *in)
 
 	fd = accept(s->fdt.fd, NULL, NULL);
 	if (fd == SC_INVALID) {
-		sc_sock_errstr(s, 0);
+		if (!s->blocking && sc_sock_err() == SC_EAGAIN) {
+			errno = EAGAIN;
+		} else {
+			sc_sock_errstr(s, 0);
+		}
 		return -1;
 	}
 
@@ -804,6 +840,7 @@ void sc_sock_print(struct sc_sock *sock, char *buf, size_t len)
 
 const char *sc_sock_pipe_err(struct sc_sock_pipe *pipe)
 {
+	pipe->err[sizeof(pipe->err) - 1] = '\0';
 	return pipe->err;
 }
 
@@ -835,10 +872,6 @@ int sc_sock_pipe_init(struct sc_sock_pipe *p, int type)
 	};
 
 	p->fdt.type = type;
-	p->fdt.op = SC_SOCK_NONE;
-	p->fdt.index = -1;
-	p->fds[0] = INVALID_SOCKET;
-	p->fds[1] = INVALID_SOCKET;
 
 	/*  Create listening socket. */
 	listener = socket(AF_INET, SOCK_STREAM, 0);
@@ -893,6 +926,7 @@ int sc_sock_pipe_init(struct sc_sock_pipe *p, int type)
 		goto wsafail;
 	}
 
+	p->fdt.fd = p->fds[0];
 	closesocket(listener);
 
 	return 0;
@@ -935,7 +969,7 @@ int sc_sock_pipe_write(struct sc_sock_pipe *p, void *data, unsigned int len)
 	int rc;
 
 	rc = send(p->fds[1], data, len, 0);
-	if (rc == SOCKET_ERROR || (unsigned int) rc != len) {
+	if (rc == SOCKET_ERROR) {
 		sc_sock_pipe_set_err(p, "pipe send() : err(%d) ",
 				     WSAGetLastError());
 	}
@@ -948,7 +982,7 @@ int sc_sock_pipe_read(struct sc_sock_pipe *p, void *data, unsigned int len)
 	int rc;
 
 	rc = recv(p->fds[0], (char *) data, len, 0);
-	if (rc == SOCKET_ERROR || (unsigned int) rc != len) {
+	if (rc == SOCKET_ERROR) {
 		sc_sock_pipe_set_err(p, "pipe recv() : err(%d) ",
 				     WSAGetLastError());
 	}
@@ -1016,7 +1050,7 @@ retry:
 		goto retry;
 	}
 
-	return n;
+	return (int) n;
 }
 
 int sc_sock_pipe_read(struct sc_sock_pipe *p, void *data, unsigned int len)
@@ -1030,25 +1064,34 @@ retry:
 		goto retry;
 	}
 
-	return n;
+	return (int) n;
 }
 
 #endif
 
+#ifdef _MSC_VER
+// Thread local for MSVC compiler.
+#define __thread __declspec(thread)
+#endif
+
+static __thread char sc_sock_poll_errstr[128];
+
 const char *sc_sock_poll_err(struct sc_sock_poll *p)
 {
-	return p->err;
+	(void)p;
+	return sc_sock_poll_errstr;
 }
 
 static void sc_sock_poll_set_err(struct sc_sock_poll *p, const char *fmt, ...)
 {
+	(void)p;
 	va_list args;
 
 	va_start(args, fmt);
-	vsnprintf(p->err, sizeof(p->err), fmt, args);
+	vsnprintf(sc_sock_poll_errstr, sizeof(sc_sock_poll_errstr), fmt, args);
 	va_end(args);
 
-	p->err[sizeof(p->err) - 1] = '\0';
+	sc_sock_poll_errstr[sizeof(sc_sock_poll_errstr) - 1] = '\0';
 }
 
 #if defined(__linux__)
@@ -1059,7 +1102,7 @@ int sc_sock_poll_init(struct sc_sock_poll *p)
 
 	*p = (struct sc_sock_poll){0};
 
-	p->events = sc_sock_malloc(sizeof(*p->events) * 16);
+	p->events = sc_sock_malloc(sizeof(*p->events) * SC_SOCK_POLL_MAX_EVENTS);
 	if (p->events == NULL) {
 		errno = ENOMEM;
 		goto error;
@@ -1069,8 +1112,6 @@ int sc_sock_poll_init(struct sc_sock_poll *p)
 	if (fds == -1) {
 		goto error;
 	}
-
-	p->cap = 16;
 	p->fds = fds;
 
 	return 0;
@@ -1101,79 +1142,61 @@ int sc_sock_poll_term(struct sc_sock_poll *p)
 
 	p->events = NULL;
 	p->fds = SC_INVALID;
-	p->cap = 0;
-	p->count = 0;
 
 	return rc;
-}
-
-static int sc_sock_poll_expand(struct sc_sock_poll *p)
-{
-	int cap, rc = 0;
-	void *ev;
-
-	if (p->count == p->cap) {
-		if (p->cap >= SC_SIZE_MAX / 2) {
-			goto error;
-		}
-
-		cap = p->cap * 2;
-		ev = sc_sock_realloc(p->events, cap * sizeof(*p->events));
-		if (ev == NULL) {
-			goto error;
-		}
-
-		p->cap = cap;
-		p->events = ev;
-	}
-
-	return rc;
-
-error:
-	sc_sock_poll_set_err(p, "Out of memory.");
-	return -1;
 }
 
 int sc_sock_poll_add(struct sc_sock_poll *p, struct sc_sock_fd *fdt,
 		     enum sc_sock_ev events, void *data)
 {
 	int rc, op = EPOLL_CTL_MOD;
-	enum sc_sock_ev mask = fdt->op | events;
+
+	enum sc_sock_ev old_mask = fdt->op;
+	enum sc_sock_ev new_mask = old_mask | events;
+
+	if (new_mask == SC_SOCK_EDGE) {
+		new_mask = SC_SOCK_NONE;
+	}
+
+	if (old_mask == new_mask) {
+		return 0;
+	}
 
 	struct epoll_event ep_ev = {
 		.data.ptr = data,
 		.events = EPOLLERR | EPOLLHUP | EPOLLRDHUP,
 	};
 
-	if ((fdt->op & events) == events) {
-		return 0;
-	}
-
-	if (fdt->op == SC_SOCK_NONE) {
-		rc = sc_sock_poll_expand(p);
-		if (rc != 0) {
-			return -1;
-		}
-
+	if (old_mask == SC_SOCK_NONE) {
 		op = EPOLL_CTL_ADD;
 	}
 
-	if (mask & SC_SOCK_READ) {
+	if (new_mask & SC_SOCK_READ) {
 		ep_ev.events |= EPOLLIN;
 	}
 
-	if (mask & SC_SOCK_WRITE) {
+	if (new_mask & SC_SOCK_WRITE) {
 		ep_ev.events |= EPOLLOUT;
 	}
 
+	if (new_mask & SC_SOCK_EDGE) {
+		ep_ev.events |= EPOLLET;
+	}
+
+	// All the updates to fdt must be done before epoll_ctl() call to
+	// avoid data race: fdt can be published as *data here and this way
+	// a poller thread can see it partially updated if we do not follow
+	// that rule.
+	fdt->op = new_mask;
+
 	rc = epoll_ctl(p->fds, op, fdt->fd, &ep_ev);
+
 	if (rc != 0) {
+		// Rollback to the original state if failed.
+		fdt->op = old_mask;
 		sc_sock_poll_set_err(p, "epoll_ctl : %s ", strerror(errno));
 		return -1;
 	}
-
-	p->count += fdt->op == SC_SOCK_NONE;
-	fdt->op = mask;
 
 	return 0;
 }
@@ -1187,29 +1210,43 @@ int sc_sock_poll_del(struct sc_sock_poll *p, struct sc_sock_fd *fdt,
 		.events = EPOLLERR | EPOLLHUP | EPOLLRDHUP,
 	};
 
-	if ((fdt->op & events) == 0) {
+	enum sc_sock_ev old_mask = fdt->op;
+	enum sc_sock_ev new_mask = old_mask & ~events;
+
+	if (new_mask == SC_SOCK_EDGE) {
+		new_mask = SC_SOCK_NONE;
+	}
+
+	if (old_mask == new_mask) {
 		return 0;
 	}
 
-	fdt->op &= ~events;
-	op = fdt->op == SC_SOCK_NONE ? EPOLL_CTL_DEL : EPOLL_CTL_MOD;
+	op = new_mask == SC_SOCK_NONE ? EPOLL_CTL_DEL : EPOLL_CTL_MOD;
 
-	if (fdt->op & SC_SOCK_READ) {
+	if (new_mask & SC_SOCK_READ) {
 		ep_ev.events |= EPOLLIN;
 	}
 
-	if (fdt->op & SC_SOCK_WRITE) {
+	if (new_mask & SC_SOCK_WRITE) {
 		ep_ev.events |= EPOLLOUT;
 	}
 
-	rc = epoll_ctl(p->fds, op, fdt->fd, &ep_ev);
-	if (rc != 0) {
-		sc_sock_poll_set_err(p, "epoll_ctl : %s ", strerror(errno));
-		return -1;
+	if (new_mask & SC_SOCK_EDGE) {
+		ep_ev.events |= EPOLLET;
 	}
 
-	if (fdt->op == SC_SOCK_NONE) {
-		p->count--;
+	// All the updates to fdt must be done before epoll_ctl() call to avoid
+	// data race: fdt can be published as *data here and this way a poller
+	// thread can see it partially updated if we do not follow that rule.
+	fdt->op = new_mask;
+
+	rc = epoll_ctl(p->fds, op, fdt->fd, &ep_ev);
+
+	if (rc != 0) {
+		// Rollback to the original state if failed.
+		fdt->op = old_mask;
+		sc_sock_poll_set_err(p, "epoll_ctl : %s ", strerror(errno));
+		return -1;
 	}
 
 	return 0;
@@ -1244,9 +1281,15 @@ uint32_t sc_sock_poll_event(struct sc_sock_poll *p, int i)
 int sc_sock_poll_wait(struct sc_sock_poll *p, int timeout)
 {
 	int n;
+	struct epoll_event *events = p->events;
+
+	if (events == NULL) {
+		sc_sock_poll_set_err(p, "poll : sc_sock_poll is not initialized or already terminated");
+		return -1;
+	}
 
 	do {
-		n = epoll_wait(p->fds, &p->events[0], p->cap, timeout);
+		n = epoll_wait(p->fds, events, SC_SOCK_POLL_MAX_EVENTS, timeout);
 	} while (n < 0 && errno == EINTR);
 
 	if (n == -1) {
@@ -1264,7 +1307,7 @@ int sc_sock_poll_init(struct sc_sock_poll *p)
 
 	*p = (struct sc_sock_poll){0};
 
-	p->events = sc_sock_malloc(sizeof(*p->events) * 16);
+	p->events = sc_sock_malloc(sizeof(*p->events) * SC_SOCK_POLL_MAX_EVENTS);
 	if (p->events == NULL) {
 		errno = ENOMEM;
 		goto err;
@@ -1274,8 +1317,6 @@ int sc_sock_poll_init(struct sc_sock_poll *p)
 	if (fds == -1) {
 		goto err;
 	}
-
-	p->cap = 16;
 	p->fds = fds;
 
 	return 0;
@@ -1285,33 +1326,6 @@ err:
 	p->events = NULL;
 	p->fds = -1;
 
-	return -1;
-}
-
-static int sc_sock_poll_expand(struct sc_sock_poll *p)
-{
-	int rc = 0, cap;
-	void *ev;
-
-	if (p->count == p->cap) {
-		if (p->cap >= SC_SIZE_MAX / 2) {
-			goto err;
-		}
-
-		cap = p->cap * 2;
-		ev = sc_sock_realloc(p->events, cap * sizeof(*p->events));
-		if (ev == NULL) {
-			goto err;
-		}
-
-		p->cap = cap;
-		p->events = ev;
-	}
-
-	return rc;
-
-err:
-	sc_sock_poll_set_err(p, "Out of memory.");
 	return -1;
 }
 
@@ -1332,8 +1346,6 @@ int sc_sock_poll_term(struct sc_sock_poll *p)
 
 	p->events = NULL;
 	p->fds = SC_INVALID;
-	p->cap = 0;
-	p->count = 0;
 
 	return rc;
 }
@@ -1343,35 +1355,45 @@ int sc_sock_poll_add(struct sc_sock_poll *p, struct sc_sock_fd *fdt,
 {
 	int rc, count = 0;
 	struct kevent ev[2];
-	int mask = fdt->op | events;
 
-	if ((fdt->op & events) == events) {
+	enum sc_sock_ev old_mask = fdt->op;
+	enum sc_sock_ev new_mask = old_mask | events;
+
+	if (new_mask == SC_SOCK_EDGE) {
+		new_mask = SC_SOCK_NONE;
+	}
+
+	if (old_mask == new_mask) {
 		return 0;
 	}
 
-	if (fdt->op == SC_SOCK_NONE) {
-		rc = sc_sock_poll_expand(p);
-		if (rc != 0) {
-			return -1;
-		}
+	unsigned short act = EV_ADD;
+
+	if (new_mask & SC_SOCK_EDGE) {
+		act |= EV_CLEAR;
 	}
 
-	if (mask & SC_SOCK_WRITE) {
-		EV_SET(&ev[count++], fdt->fd, EVFILT_WRITE, EV_ADD, 0, 0, data);
+	if (new_mask & SC_SOCK_WRITE) {
+		EV_SET(&ev[count++], fdt->fd, EVFILT_WRITE, act, 0, 0, data);
 	}
 
-	if (mask & SC_SOCK_READ) {
-		EV_SET(&ev[count++], fdt->fd, EVFILT_READ, EV_ADD, 0, 0, data);
+	if (new_mask & SC_SOCK_READ) {
+		EV_SET(&ev[count++], fdt->fd, EVFILT_READ, act, 0, 0, data);
 	}
+
+	// All the updates to fdt must be done before kevent() call to avoid
+	// data race: fdt can be published as *data here and this way a poller
+	// thread can see it partially updated if we do not follow that rule.
+	fdt->op = new_mask;
 
 	rc = kevent(p->fds, ev, count, NULL, 0, NULL);
+
 	if (rc != 0) {
+		// Rollback to the original state if failed.
+		fdt->op = old_mask;
 		sc_sock_poll_set_err(p, "kevent : %s ", strerror(errno));
 		return -1;
 	}
-
-	p->count += fdt->op == SC_SOCK_NONE;
-	fdt->op = mask;
 
 	return 0;
 }
@@ -1379,32 +1401,46 @@ int sc_sock_poll_add(struct sc_sock_poll *p, struct sc_sock_fd *fdt,
 int sc_sock_poll_del(struct sc_sock_poll *p, struct sc_sock_fd *fdt,
 		     enum sc_sock_ev events, void *data)
 {
-	(void) data;
-
 	int rc, count = 0;
 	struct kevent ev[2];
-	int mask = fdt->op & events;
 
-	if (mask == 0) {
+	enum sc_sock_ev old_mask = fdt->op;
+	enum sc_sock_ev del_mask = old_mask & events;
+	enum sc_sock_ev new_mask = old_mask & ~events;
+
+	if (new_mask == SC_SOCK_EDGE) {
+		new_mask = SC_SOCK_NONE;
+	}
+
+	if (old_mask == new_mask) {
 		return 0;
 	}
 
-	if (mask & SC_SOCK_READ) {
-		EV_SET(&ev[count++], fdt->fd, EVFILT_READ, EV_DELETE, 0, 0, 0);
+	if (del_mask & SC_SOCK_READ) {
+		EV_SET(&ev[count++], fdt->fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+	} else if ((del_mask & SC_SOCK_EDGE) && (old_mask & SC_SOCK_READ)) {
+		EV_SET(&ev[count++], fdt->fd, EVFILT_READ, EV_ADD, 0, 0, data);
 	}
 
-	if (mask & SC_SOCK_WRITE) {
-		EV_SET(&ev[count++], fdt->fd, EVFILT_WRITE, EV_DELETE, 0, 0, 0);
+	if (del_mask & SC_SOCK_WRITE) {
+		EV_SET(&ev[count++], fdt->fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+	} else if ((del_mask & SC_SOCK_EDGE) && (old_mask & SC_SOCK_WRITE)) {
+		EV_SET(&ev[count++], fdt->fd, EVFILT_WRITE, EV_ADD, 0, 0, data);
 	}
+
+	// All the updates to fdt must be done before kevent() call to avoid
+	// data race: fdt can be published as *data here and this way a poller
+	// thread can see it partially updated if we do not follow that rule.
+	fdt->op = new_mask;
 
 	rc = kevent(p->fds, ev, count, NULL, 0, NULL);
+
 	if (rc != 0) {
+		// Rollback to the original state if failed.
+		fdt->op = old_mask;
 		sc_sock_poll_set_err(p, "kevent : %s ", strerror(errno));
 		return -1;
 	}
-
-	fdt->op &= ~events;
-	p->count -= fdt->op == SC_SOCK_NONE;
 
 	return 0;
 }
@@ -1433,12 +1469,18 @@ int sc_sock_poll_wait(struct sc_sock_poll *p, int timeout)
 {
 	int n;
 	struct timespec ts;
+	struct kevent *events = p->events;
+
+	if (events == NULL) {
+		sc_sock_poll_set_err(p, "poll : sc_sock_poll is not initialized or already terminated");
+		return -1;
+	}
 
 	do {
 		ts.tv_sec = timeout / 1000;
 		ts.tv_nsec = (timeout % 1000) * 1000000;
 
-		n = kevent(p->fds, NULL, 0, &p->events[0], p->cap,
+		n = kevent(p->fds, NULL, 0, events, SC_SOCK_POLL_MAX_EVENTS,
 			   timeout >= 0 ? &ts : NULL);
 	} while (n < 0 && errno == EINTR);
 
@@ -1451,17 +1493,38 @@ int sc_sock_poll_wait(struct sc_sock_poll *p, int timeout)
 
 #else // WINDOWS
 
+static void sc_sock_poll_set_err_from_code(int err_code)
+{
+	int rc;
+	LPSTR str = 0;
+
+	rc = FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER |
+				    FORMAT_MESSAGE_FROM_SYSTEM,
+			    NULL, err_code, 0, (LPSTR) &str, 0, NULL);
+	if (rc != 0) {
+		strncpy(sc_sock_poll_errstr, str, sizeof(sc_sock_poll_errstr) - 1);
+		LocalFree(str);
+	}
+}
+
 int sc_sock_poll_init(struct sc_sock_poll *p)
 {
+	bool pipe_failed = false;
+
 	*p = (struct sc_sock_poll){0};
+
+	p->results = sc_sock_malloc(sizeof(*p->results) * SC_SOCK_POLL_MAX_EVENTS);
+	if (p->results == NULL) {
+		goto err;
+	}
 
 	p->events = sc_sock_malloc(sizeof(*p->events) * 16);
 	if (p->events == NULL) {
 		goto err;
 	}
 
-	p->data = sc_sock_malloc(sizeof(void *) * 16);
-	if (p->data == NULL) {
+	p->data[0] = sc_sock_malloc(sizeof(struct sc_sock_poll_data) * 16);
+	if (p->data[0] == NULL) {
 		goto err;
 	}
 
@@ -1471,13 +1534,29 @@ int sc_sock_poll_init(struct sc_sock_poll *p)
 		p->events[i].fd = SC_INVALID;
 	}
 
+	if (sc_sock_pipe_init(&p->wakeup_pipe, 0) != 0) {
+		pipe_failed = true;
+		goto err;
+	}
+
+	// Never fails.
+	InitializeCriticalSectionAndSpinCount(&p->lock, 4000);
+
+	// The only possible error is "Out of memory", which must be impossible
+	// here.
+	sc_sock_poll_add(p, &p->wakeup_pipe.fdt, SC_SOCK_READ, NULL);
+	assert(p->wakeup_pipe.fdt.poll_data->index == 0);
+
 	return 0;
 err:
+	sc_sock_free(p->results);
 	sc_sock_free(p->events);
+	sc_sock_free(p->data[0]);
 	p->events = NULL;
-	p->data = NULL;
+	p->data[0] = NULL;
 
-	sc_sock_poll_set_err(p, "Out of memory.");
+	sc_sock_poll_set_err(p,
+		pipe_failed ? sc_sock_pipe_err(&p->wakeup_pipe) : "Out of memory.");
 
 	return -1;
 }
@@ -1488,20 +1567,35 @@ int sc_sock_poll_term(struct sc_sock_poll *p)
 		return 0;
 	}
 
+	int rc = 0;
+
+	if (sc_sock_poll_del(p, &p->wakeup_pipe.fdt, SC_SOCK_READ, NULL) != 0) {
+		rc = -1;
+	} else if (sc_sock_pipe_term(&p->wakeup_pipe) != 0) {
+		rc = -1;
+		sc_sock_poll_set_err(p, "poll term : %s", sc_sock_pipe_err(&p->wakeup_pipe));
+	}
+	DeleteCriticalSection(&p->lock);
+
+	for (int i = 0; i < 16 && p->data[i] != NULL; i++) {
+		sc_sock_free(p->data[i]);
+		p->data[i] = NULL;
+	}
+
+	sc_sock_free(p->results);
 	sc_sock_free(p->events);
-	sc_sock_free(p->data);
+	sc_sock_free(p->ops);
 
 	p->events = NULL;
 	p->cap = 0;
 	p->count = 0;
 
-	return 0;
+	return rc;
 }
 
 static int sc_sock_poll_expand(struct sc_sock_poll *p)
 {
 	int cap, rc = 0;
-	void **data = NULL;
 	struct pollfd *ev = NULL;
 
 	if (p->count == p->cap) {
@@ -1515,13 +1609,35 @@ static int sc_sock_poll_expand(struct sc_sock_poll *p)
 			goto err;
 		}
 
-		data = sc_sock_realloc(p->data, cap * sizeof(*data));
-		if (data == NULL) {
+		// We do not use realloc for p->data as with p->events because
+		// we need a stable pointer for sc_sock_poll_data from
+		// sc_sock_fd, thus instead we append a next chunk as large as
+		// the current capacity, this way we double the total capacity.
+		// The resulting data structure will have the following
+		// chunk sizes: [16, 16, 32, 64, 128, 256... ]
+		// Important properties of this data structure are that:
+		//  - every new chunk is 2x larger than the previous one
+		//    (except for the first chunk)
+		//  - all the chunk sizes are power of 2
+		// which allow to easily calculate coordinates in this
+		// two-dimensional data structure from an absolute index
+		// (from zero to capacity).
+		bool data_expanded = false;
+		for (int i = 1; i < 16; i++) {
+			if (p->data[i] == NULL) {
+				p->data[i] = sc_sock_malloc(sizeof(struct sc_sock_poll_data) * p->cap);
+				if (p->data[i] == NULL) {
+					goto err;
+				}
+				data_expanded = true;
+				break;
+			}
+		}
+		if (!data_expanded) {
 			goto err;
 		}
 
 		p->events = ev;
-		p->data = data;
 
 		for (int i = p->cap; i < cap; i++) {
 			p->events[i].fd = SC_INVALID;
@@ -1538,21 +1654,152 @@ err:
 	return -1;
 }
 
+static int sc_sock_poll_submit(struct sc_sock_poll *p, struct sc_sock_fd *fdt,
+			       enum sc_sock_ev events, void *data, bool add)
+{
+	bool wakeup_poller = false;
+	int rc, index, cap = p->ops_cap;
+	struct sc_sock_poll_op *o, *ops = p->ops;
+
+	if (fdt->op_index == -1) {
+		// Appends the new operation to the end of the list.
+		index = p->ops_count;
+
+		// Expand p->ops if capacity is exceeded.
+		if (index == cap) {
+			if (cap >= SC_SIZE_MAX) {
+				ops = NULL;
+			} else if (ops == NULL) {
+				cap = 16;
+				ops = sc_sock_malloc(cap * sizeof(*ops));
+			} else {
+				cap = cap * 3 / 2;
+				ops = sc_sock_realloc(ops, cap * sizeof(*ops));
+			}
+			if (ops != NULL) {
+				p->ops_cap = cap;
+				p->ops = ops;
+			} else {
+				sc_sock_poll_set_err(p, "Out of memory.");
+				rc = -1;
+				goto exit;
+			}
+		}
+
+		p->ops_count++;
+        ops[index] = (struct sc_sock_poll_op){0};
+
+		// It is enough to wake up the poller only for the first
+		// submitted operation.
+		wakeup_poller = index == 0;
+	} else {
+		// We already have an operation submitted for the given fdt,
+		// here we will try to merge the new operation with the existing
+		// one.
+		index = fdt->op_index;
+	}
+
+	o = &ops[index];
+
+	if (add) {
+		o->add_events |= events;
+		o->del_events &= ~events;
+	} else {
+		o->add_events &= ~events;
+		o->del_events |= events;
+	}
+
+	o->full_del = ((fdt->op | o->add_events) & ~(o->del_events | SC_SOCK_EDGE)) == 0;
+
+	// If we are completely removing fdt from poll,
+	// we only provide a reference to poll_data instead of fdt,
+	// because fdt can be deallocated right away after this call.
+	if (o->full_del) {
+		o->poll_data = fdt->poll_data;
+
+		// Update fdt while we are under the lock.
+		// This should not cause any races because any subsequent
+		// operations on this fdt are guaranteed to be processed after
+		// the current full delete operation.
+		fdt->poll_data = NULL;
+		fdt->op_index = -1;
+		fdt->op = SC_SOCK_NONE;
+	} else {
+		o->fdt = fdt;
+		fdt->op_index = index;
+	}
+
+	o->data = data;
+	rc = 0;
+exit:
+	LeaveCriticalSection(&p->lock);
+
+	// Write to wakeup_pipe outside of the lock to reduce lock contention.
+	if (rc == 0 && wakeup_poller &&
+	    sc_sock_pipe_write(&p->wakeup_pipe, "W", 1) != 1) {
+		sc_sock_poll_set_err(p, "poll wakeup : %s", sc_sock_pipe_err(&p->wakeup_pipe));
+		rc = -1;
+	}
+	return rc;
+}
+
+// Define GCC intrinsic for MSVC to be compatible with both.
+#ifdef _MSC_VER
+// Number of leading zeros in unsigned int value.
+#define __builtin_clz(x) ((int)__lzcnt(x))
+#endif
+
+static inline int sc_sock_number_of_meaningful_bits(unsigned int i)
+{
+	return sizeof(unsigned int) * 8 - __builtin_clz(i);
+}
+
+static struct sc_sock_poll_data *sc_sock_poll_data_inner(struct sc_sock_poll *p, int i)
+{
+	if (i < 16) {
+		return &p->data[0][i];
+	}
+
+	int n = sc_sock_number_of_meaningful_bits(i);
+
+	// Equivalent of `n + 1 - sc_sock_number_of_meaningful_bits(first_chunk_size)`,
+	// currently the smallest chunk size is 16, thus it is `n + 1 - 5`
+	int x = n - 4;
+
+	// Clear the most significant bit in i.
+	int y = i & ~(1 << (n - 1));
+
+	return &p->data[x][y];
+}
+
 int sc_sock_poll_add(struct sc_sock_poll *p, struct sc_sock_fd *fdt,
 		     enum sc_sock_ev events, void *data)
 {
-	int rc;
-	int index = fdt->index;
+	int rc = 0;
+	int index = -1;
+	struct sc_sock_poll_data *pd = NULL;
+	enum sc_sock_ev mask;
 
-	if ((fdt->op & events) == events) {
-		return 0;
+	EnterCriticalSection(&p->lock);
+
+	// If polling is in progress we can not modify p->events, instead submit
+	// the operation for asynchronous processing later by the poller thread.
+	if (p->polling) {
+		// sc_sock_poll_submit() calls LeaveCriticalSection()
+		return sc_sock_poll_submit(p, fdt, events, data, true);
+	}
+
+	mask = fdt->op | events;
+
+	if (fdt->op == mask) {
+		goto exit;
 	}
 
 	if (fdt->op == SC_SOCK_NONE) {
 		rc = sc_sock_poll_expand(p);
 		if (rc != 0) {
 			sc_sock_poll_set_err(p, "Out of memory.");
-			return -1;
+			goto exit;
 		}
 
 		p->count++;
@@ -1566,68 +1813,126 @@ int sc_sock_poll_add(struct sc_sock_poll *p, struct sc_sock_fd *fdt,
 
 		assert(index != -1);
 
+		pd = sc_sock_poll_data_inner(p, index);
+		pd->index = index;
+		InterlockedExchange(&pd->edge_mask, SC_SOCK_NONE);
+		fdt->poll_data = pd;
+
 		p->events[index].fd = fdt->fd;
-		fdt->index = index;
+	} else {
+		pd = fdt->poll_data;
+		index = pd->index;
 	}
 
 	assert(index != -1);
+	assert(pd != NULL);
 
-	fdt->op |= events;
+	fdt->op = mask;
 
-	p->events[fdt->index].events = 0;
-	p->events[fdt->index].revents = 0;
+	p->events[index].events = 0;
+	p->events[index].revents = 0;
 
-	if (events & SC_SOCK_READ) {
-		p->events[fdt->index].events |= POLLIN;
+	if (mask & SC_SOCK_READ) {
+		p->events[index].events |= POLLIN;
 	}
 
-	if (events & SC_SOCK_WRITE) {
-		p->events[fdt->index].events |= POLLOUT;
+	if (mask & SC_SOCK_WRITE) {
+		p->events[index].events |= POLLOUT;
 	}
 
-	p->data[fdt->index] = data;
+	if (mask & SC_SOCK_EDGE) {
+		InterlockedOr(&pd->edge_mask, SC_SOCK_EDGE);
+	}
 
-	return 0;
+	pd->data = data;
+
+exit:
+	LeaveCriticalSection(&p->lock);
+	return rc;
+}
+
+static void sc_sock_poll_del_full(struct sc_sock_poll *p,
+				  struct sc_sock_poll_data *pd)
+{
+	p->events[pd->index].fd = SC_INVALID;
+	p->count--;
+	InterlockedExchange(&pd->edge_mask, SC_SOCK_NONE);
 }
 
 int sc_sock_poll_del(struct sc_sock_poll *p, struct sc_sock_fd *fdt,
 		     enum sc_sock_ev events, void *data)
 {
+	EnterCriticalSection(&p->lock);
+
+	// If polling is in progress we can not modify p->events, instead submit
+	// the operation for asynchronous processing later by the poller thread.
+	if (p->polling) {
+		// sc_sock_poll_submit() calls LeaveCriticalSection()
+		return sc_sock_poll_submit(p, fdt, events, data, false);
+    }
+
 	if ((fdt->op & events) == 0) {
-		return 0;
+		goto exit;
 	}
 
 	fdt->op &= ~events;
+
+	if (fdt->op == SC_SOCK_EDGE) {
+		fdt->op = SC_SOCK_NONE;
+	}
+
+	struct sc_sock_poll_data *pd = fdt->poll_data;
+
 	if (fdt->op == SC_SOCK_NONE) {
-		p->events[fdt->index].fd = SC_INVALID;
-		p->count--;
-		fdt->index = -1;
+		fdt->poll_data = NULL;
+		sc_sock_poll_del_full(p, pd);
 	} else {
-		p->events[fdt->index].events = 0;
+		p->events[pd->index].events = 0;
 
 		if (fdt->op & SC_SOCK_READ) {
-			p->events[fdt->index].events |= POLLIN;
+			p->events[pd->index].events |= POLLIN;
 		}
 
 		if (fdt->op & SC_SOCK_WRITE) {
-			p->events[fdt->index].events |= POLLOUT;
+			p->events[pd->index].events |= POLLOUT;
 		}
 
-		p->data[fdt->index] = data;
+		if ((fdt->op & SC_SOCK_EDGE) == 0) {
+			InterlockedExchange(&pd->edge_mask, SC_SOCK_NONE);
+		}
+
+		pd->data = data;
 	}
 
+exit:
+	LeaveCriticalSection(&p->lock);
 	return 0;
 }
 
 void *sc_sock_poll_data(struct sc_sock_poll *p, int i)
 {
-	return p->data[i];
+	return p->results[i].data;
 }
 
 uint32_t sc_sock_poll_event(struct sc_sock_poll *p, int i)
 {
+	return p->results[i].events;
+}
+
+static uint32_t sc_sock_poll_event_inner(struct sc_sock_poll *p, int i)
+{
+	if (p->events[i].fd == SC_INVALID) {
+		return SC_SOCK_NONE;
+	}
+
 	uint32_t evs = 0;
 	uint32_t poll_evs = p->events[i].revents;
+
+	if (poll_evs == 0) {
+		return SC_SOCK_NONE;
+	}
+
+	p->results_remaining--;
 
 	if (poll_evs & POLLIN) {
 		evs |= SC_SOCK_READ;
@@ -1635,6 +1940,21 @@ uint32_t sc_sock_poll_event(struct sc_sock_poll *p, int i)
 
 	if (poll_evs & POLLOUT) {
 		evs |= SC_SOCK_WRITE;
+	}
+
+	// Start masking fired events in Edge-Triggered mode.
+	struct sc_sock_poll_data *pd = sc_sock_poll_data_inner(p, i);
+
+	if (pd->edge_mask & SC_SOCK_EDGE) {
+		// We can have two possible race conditions on edge_mask updates:
+		// 1. "stop masking" incorrectly happens after "start masking"
+		//     will result in an extra event fired, which is fine.
+		// 2. "stop masking" incorrectly happens before "start masking"
+		//     will mean that the current event will not be masked here,
+		//     which is also fine.
+		// It means the scenario when we miss events and hang should be
+		// impossible.
+		evs &= ~InterlockedOr(&pd->edge_mask, evs);
 	}
 
 	poll_evs &= POLLHUP | POLLERR;
@@ -1645,21 +1965,157 @@ uint32_t sc_sock_poll_event(struct sc_sock_poll *p, int i)
 	return evs;
 }
 
+static int sc_sock_poll_fill_results(struct sc_sock_poll *p)
+{
+	int found = 0;
+
+	for (int i = p->results_offset; i < p->cap && p->results_remaining > 0; i++) {
+		enum sc_sock_ev events = sc_sock_poll_event_inner(p, i);
+
+		if (events != SC_SOCK_NONE) {
+			p->results[found++] = (struct sc_sock_poll_result){
+				.events = events,
+				.data = sc_sock_poll_data_inner(p, i)->data,
+			};
+
+			if (found == SC_SOCK_POLL_MAX_EVENTS) {
+				p->results_offset = i + 1;
+				return found;
+			}
+		}
+	}
+
+	// We only can reach this line when either p->results_remaining is
+	// already 0 or when i reaches p->cap, in the latter case we need to
+	// reset p->results_remaining to 0 because we are missing some expected
+	// events after processing submitted socket ops.
+	p->results_remaining = 0;
+	return found;
+}
+
 int sc_sock_poll_wait(struct sc_sock_poll *p, int timeout)
 {
-	int n, rc = p->cap;
+	int n, last_err, rc = 0;
 
 	timeout = (timeout == -1) ? 16 : timeout;
 
-	do {
-		n = WSAPoll(p->events, (ULONG) p->cap, timeout);
-	} while (n < 0 && errno == EINTR);
-
-	if (n == SC_INVALID) {
-		rc = -1;
-		sc_sock_poll_set_err(p, "poll : %s ", strerror(errno));
+	if (p->events == NULL) {
+		sc_sock_poll_set_err(p, "poll : sc_sock_poll is not initialized or already terminated");
+		return -1;
 	}
 
+	EnterCriticalSection(&p->lock);
+	if (p->polling) {
+		rc = -1;
+		sc_sock_poll_set_err(p, "poll : polling is already in progress in a parallel thread");
+		goto exit;
+	}
+	if (p->results_remaining > 0) {
+		assert(p->results_offset >= 1);
+		// Fill the remaining results that did not fit into p->results
+		// in the previous iteration.
+		rc = sc_sock_poll_fill_results(p);
+		goto exit;
+	}
+
+	// When p->polling is set to true, no add/del operations can happen,
+	// instead these operations will be submitted to the sc_sock_poll->ops
+	// and processed by the poller thread after the polling is finished.
+	p->polling = true;
+	LeaveCriticalSection(&p->lock);
+
+retry:
+	// When p->polling is set to true p->events and p->cap are
+	// stable and can be read outside of the lock.
+	n = WSAPoll(p->events, (ULONG) p->cap, timeout);
+
+	if (n == SOCKET_ERROR) {
+		last_err = WSAGetLastError();
+		if (last_err == WSAEINTR) {
+			goto retry;
+		}
+	}
+
+	if (n > 0) {
+		// sc_sock_poll_event_inner() will decrement
+		// p->results_remaining when we have some events found.
+		p->results_remaining = n;
+
+		// Drain wakeup_pipe only when we can do that without blocking.
+		if (sc_sock_poll_event_inner(p, 0) == SC_SOCK_READ) {
+			// To reduce contention we drain wakeup_pipe outside of
+			// the lock. It is safe to do that before the processing
+			// of p->ops, this way we do not drain any extra wakeup
+			// signals.
+			//
+			// At this point we may have any number of bytes in
+			// wakeup_pipe, we just pick reasonably large buffer
+			// size for draining and assume that sc_sock_pipe_read()
+			// supports partial reads
+			// (less than the provided buffer size).
+			char buf[16];
+			int drained = sc_sock_pipe_read(&p->wakeup_pipe, buf, sizeof(buf));
+			assert(drained >= 0);
+		}
+	} else {
+		// We have either empty result or error here, in both cases
+		// we do not need to assign p->results_remaining.
+		assert(n == 0 || n == SOCKET_ERROR);
+		// Because otherwise we would not even start polling.
+		assert(p->results_remaining == 0);
+	}
+
+	EnterCriticalSection(&p->lock);
+	// Have to reset p->polling before processing p->ops because it will
+	// be checked inside of sc_sock_poll_add() and sc_sock_poll_del().
+	assert(p->polling);
+	p->polling = false;
+
+	if (n == SOCKET_ERROR) {
+		if (last_err == WSAENOTSOCK && p->ops_count > 0) {
+			// WSAPoll() failed because a socket was concurrently closed,
+			// we assume that the dead socket fd will be deleted here in
+			// sc_sock_poll_del_full() and we will be able to continue.
+			n = 0;
+		} else {
+			rc = -1;
+			sc_sock_poll_set_err_from_code(last_err);
+			goto exit;
+		}
+	}
+	assert(n >= 0);
+
+	// Process operations in the same order as they were submitted by other
+	// threads.
+	for (int i = 0; i < p->ops_count; i++) {
+		struct sc_sock_poll_op o = p->ops[i];
+
+		if (o.full_del) {
+			sc_sock_poll_del_full(p, o.poll_data);
+		} else {
+			o.fdt->op_index = -1;
+
+			if ((o.add_events != 0 &&
+					sc_sock_poll_add(p, o.fdt, o.add_events, o.data) != 0) ||
+				(o.del_events != 0 &&
+					sc_sock_poll_del(p, o.fdt, o.del_events, o.data) != 0)) {
+				rc = -1;
+			}
+		}
+	}
+	p->ops_count = 0;
+	p->results_offset = 1;
+
+	if (rc == 0) {
+		// We have a separate buffer for results and fill it under
+		// the lock because otherwise we would need to acquire the lock
+		// on every sc_sock_poll_event() and sc_sock_poll_data() call to
+		// safely access p->events.
+		rc = sc_sock_poll_fill_results(p);
+	}
+
+exit:
+	LeaveCriticalSection(&p->lock);
 	return rc;
 }
 

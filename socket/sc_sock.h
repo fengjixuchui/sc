@@ -46,7 +46,7 @@
 #endif
 
 #if defined(_WIN32) || defined(_WIN64)
-#include <Ws2tcpip.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <winsock2.h>
 
@@ -65,6 +65,7 @@ enum sc_sock_ev
 	SC_SOCK_NONE = 0u,
 	SC_SOCK_READ = 1u,
 	SC_SOCK_WRITE = 2u,
+	SC_SOCK_EDGE = 4u,
 };
 
 enum sc_sock_family
@@ -74,11 +75,22 @@ enum sc_sock_family
 	SC_SOCK_UNIX = AF_UNIX
 };
 
+#if defined(_WIN32) || defined(_WIN64)
+struct sc_sock_poll_data {
+	volatile LONG edge_mask;
+	int index;
+	void *data;
+};
+#endif
+
 struct sc_sock_fd {
 	sc_sock_int fd;
 	enum sc_sock_ev op;
 	int type; // user data
-	int index;
+#if defined(_WIN32) || defined(_WIN64)
+	struct sc_sock_poll_data *poll_data;
+	int op_index;
+#endif
 };
 
 struct sc_sock {
@@ -92,13 +104,13 @@ struct sc_sock {
  * Call once when your application starts.
  * @return 0 on success, negative on failure.
  */
-int sc_sock_startup();
+int sc_sock_startup(void);
 
 /**
  * Call once before your application terminates
  * @return 0 on success, negative on failure.
  */
-int sc_sock_cleanup();
+int sc_sock_cleanup(void);
 
 /**
  * Initialize sock
@@ -313,10 +325,7 @@ const char *sc_sock_pipe_err(struct sc_sock_pipe *p);
 
 struct sc_sock_poll {
 	int fds;
-	int count;
-	int cap;
 	struct epoll_event *events;
-	char err[128];
 };
 
 #elif defined(__FreeBSD__) || defined(__APPLE__)
@@ -324,10 +333,7 @@ struct sc_sock_poll {
 
 struct sc_sock_poll {
 	int fds;
-	int count;
-	int cap;
 	struct kevent *events;
-	char err[128];
 };
 #else
 
@@ -335,12 +341,40 @@ struct sc_sock_poll {
 #include <poll.h>
 #endif
 
+struct sc_sock_poll_op {
+	bool full_del;
+	enum sc_sock_ev add_events;
+	enum sc_sock_ev del_events;
+	union {
+		struct sc_sock_fd *fdt;
+		struct sc_sock_poll_data *poll_data;
+	};
+	void *data;
+};
+
+struct sc_sock_poll_result {
+	enum sc_sock_ev events;
+	void *data;
+};
+
 struct sc_sock_poll {
+	CRITICAL_SECTION lock;
+
 	int count;
 	int cap;
-	void **data;
 	struct pollfd *events;
-	char err[128];
+	struct sc_sock_poll_data *data[16];
+
+	int ops_count;
+	int ops_cap;
+	struct sc_sock_poll_op *ops;
+
+	bool polling;
+	struct sc_sock_pipe wakeup_pipe;
+
+	int results_remaining;
+	int results_offset;
+	struct sc_sock_poll_result *results;
 };
 
 #endif
@@ -369,6 +403,7 @@ int sc_sock_poll_term(struct sc_sock_poll *p);
  * @param p       poll
  * @param fdt     fdt
  * @param events  SC_SOCK_READ, SC_SOCK_WRITE or SC_SOCK_READ | SC_SOCK_WRITE
+ * 		  SC_SOCK_EDGE for edge-triggerred mode
  * @param data    user data
  * @return        '0' on success, negative number on failure,
  *                call sc_sock_poll_err() to get error string
@@ -381,6 +416,7 @@ int sc_sock_poll_add(struct sc_sock_poll *p, struct sc_sock_fd *fdt,
  * @param p      poll
  * @param fdt    fdt
  * @param events SC_SOCK_READ, SC_SOCK_WRITE or SC_SOCK_READ | SC_SOCK_WRITE
+ * 		 SC_SOCK_EDGE to cancel edge-triggered mode
  * @param data   user data
  * @return       '0' on success, negative number on failure,
  *               call sc_sock_poll_err() to get error string
@@ -405,8 +441,8 @@ int sc_sock_poll_del(struct sc_sock_poll *p, struct sc_sock_fd *fdt,
  *  }
  *
  * @param poll    poll
- * @param timeout timeout
- * @return
+ * @param timeout timeout in milliseconds or -1 to wait infinitely
+ * @return number of events to handle or negative value on failure
  */
 int sc_sock_poll_wait(struct sc_sock_poll *p, int timeout);
 

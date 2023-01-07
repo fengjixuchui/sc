@@ -4,7 +4,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 void example(void)
 {
@@ -24,7 +23,7 @@ void example(void)
 	sc_map_term_str(&map);
 }
 
-void example_int_to_str()
+void example_int_to_str(void)
 {
 	uint32_t key;
 	const char *value;
@@ -82,7 +81,7 @@ static char *str_random(size_t size)
 	return dest;
 }
 
-void test_32()
+void test_32(void)
 {
 	struct sc_map_32 map;
 
@@ -159,7 +158,7 @@ void test_32()
 	sc_map_term_32(&map);
 }
 
-void test_64()
+void test_64(void)
 {
 	struct sc_map_64 map;
 
@@ -235,7 +234,7 @@ void test_64()
 	sc_map_term_64(&map);
 }
 
-void test_64v()
+void test_64v(void)
 {
 	struct sc_map_64v map;
 
@@ -311,7 +310,7 @@ void test_64v()
 	sc_map_term_64v(&map);
 }
 
-void test_64s()
+void test_64s(void)
 {
 	struct sc_map_64s map;
 
@@ -386,7 +385,7 @@ void test_64s()
 	sc_map_term_64s(&map);
 }
 
-void test_str()
+void test_str(void)
 {
 	const char *arr = "abcdefghijklmnoprstuvyzabcdefghijklmnoprstuvyzabcdef"
 			  "ghijklmnoprstuvyz";
@@ -491,7 +490,7 @@ void test_str()
 	sc_map_term_str(&map);
 }
 
-void test_sv()
+void test_sv(void)
 {
 	const char *arr = "abcdefghijklmnoprstuvyzabcdefghijklmnoprstuvyzabcdef"
 			  "ghijklmnoprstuvyz";
@@ -594,7 +593,7 @@ void test_sv()
 	sc_map_term_sv(&map);
 }
 
-void test_s64()
+void test_s64(void)
 {
 	const char *arr = "abcdefghijklmnoprstuvyzabcdefghijklmnoprstuvyzabcdef"
 			  "ghijklmnoprstuvyz";
@@ -702,7 +701,7 @@ void test_s64()
 	sc_map_term_s64(&map);
 }
 
-void test0()
+void test0(void)
 {
 	uint64_t val;
 	struct sc_map_64 map;
@@ -750,7 +749,7 @@ void test0()
 	sc_map_term_64(&map);
 }
 
-void test1()
+void test1(void)
 {
 	struct sc_map_str map;
 	char *keys[128];
@@ -902,7 +901,7 @@ void test1()
 	}
 }
 
-void test2()
+void test2(void)
 {
 	struct sc_map_32 map;
 	uint32_t keys[128];
@@ -984,7 +983,7 @@ retry:
 	sc_map_term_32(&map);
 }
 
-void test3()
+void test3(void)
 {
 	struct sc_map_64 map;
 	uint64_t keys[128];
@@ -1066,7 +1065,7 @@ retry:
 	sc_map_term_64(&map);
 }
 
-void test4()
+void test4(void)
 {
 	const char *c;
 	struct sc_map_64s map64s;
@@ -1185,7 +1184,7 @@ void test4()
 	}
 }
 
-static void test5()
+static void test5(void)
 {
 	int t = 0;
 	uint64_t key, value;
@@ -1220,13 +1219,11 @@ static void test5()
 	sc_map_term_64(&map);
 }
 
-static void test6()
+static void test6(void)
 {
 	const int count = 120000;
 	uint32_t val;
 	struct sc_map_32 map;
-
-	srand(time(NULL));
 
 	uint32_t *keys = malloc(sizeof(uint32_t) * count);
 	uint32_t *values = malloc(sizeof(uint32_t) * count);
@@ -1263,6 +1260,227 @@ static void test6()
 	free(values);
 }
 
+static void test_loop_foreach(void)
+{
+	struct sc_map_32 map;
+
+	sc_map_init_32(&map, 100, 0);
+
+	uint32_t values[1000] = {0};
+
+	for (int i = 0; i < 1000; i++) {
+		sc_map_put_32(&map, 99 * i, 107 * 99 * i);
+	}
+
+	int key, val;
+	sc_map_foreach (&map, key, val) {
+		assert(key % 99 == 0);
+		assert(key * 107 == val);
+		assert(values[key / 99] == 0);
+		values[key / 99] = 1;
+	}
+
+	for (int i = 0; i < 1000; i++) {
+		assert(values[i] == 1);
+		values[i] = 0;
+	}
+
+	int count = 0;
+	sc_map_foreach (&map, key, val) {
+		values[key / 99] = 1;
+		count++;
+		if (count == 476) {
+			break;
+		}
+	}
+
+	count = 0;
+	for (int i = 0; i < 1000; i++) {
+		if (values[i] == 1) {
+			count++;
+		}
+		values[i] = 0;
+	}
+
+	assert(count == 476);
+	sc_map_term_32(&map);
+}
+
+static void test_loop_foreach_key(void)
+{
+	struct sc_map_32 map;
+
+	sc_map_init_32(&map, 100, 0);
+
+	uint32_t values[1000] = {0};
+
+	for (int i = 0; i < 1000; i++) {
+		sc_map_put_32(&map, 99 * i, 99 * i);
+	}
+
+	int key;
+	sc_map_foreach_key (&map, key) {
+		assert(values[key / 99] == 0);
+		values[key / 99] = 1;
+	}
+
+	for (int i = 0; i < 1000; i++) {
+		assert(values[i] == 1);
+		values[i] = 0;
+	}
+
+	int count = 0;
+	sc_map_foreach_key (&map, key) {
+		values[key / 99] = 1;
+		count++;
+		if (count == 476) {
+			break;
+		}
+	}
+
+	count = 0;
+	for (int i = 0; i < 1000; i++) {
+		if (values[i] == 1) {
+			count++;
+		}
+		values[i] = 0;
+	}
+
+	assert(count == 476);
+	sc_map_term_32(&map);
+}
+
+static void test_loop_foreach_value(void)
+{
+	struct sc_map_32 map;
+
+	sc_map_init_32(&map, 100, 0);
+
+	uint32_t values[1000] = {0};
+
+	for (int i = 0; i < 1000; i++) {
+		sc_map_put_32(&map, 99 * i, 99 * i);
+	}
+
+	int value;
+	sc_map_foreach_value (&map, value) {
+		assert(values[value / 99] == 0);
+		values[value / 99] = 1;
+	}
+
+	for (int i = 0; i < 1000; i++) {
+		assert(values[i] == 1);
+		values[i] = 0;
+	}
+
+	int count = 0;
+	sc_map_foreach_key (&map, value) {
+		values[value / 99] = 1;
+		count++;
+		if (count == 476) {
+			break;
+		}
+	}
+
+	count = 0;
+	for (int i = 0; i < 1000; i++) {
+		if (values[i] == 1) {
+			count++;
+		}
+		values[i] = 0;
+	}
+
+	assert(count == 476);
+	sc_map_term_32(&map);
+}
+
+void test_loop_generic(void)
+{
+	struct sc_map_64 map;
+
+	sc_map_init_64(&map, 0, 0);
+
+	int keys[100] = {0};
+
+	for (int i = 0; i < 100; i++) {
+		sc_map_put_64(&map, i, i * 918);
+	}
+
+	uint64_t key, value;
+	sc_map_foreach (&map, key, value) {
+		assert(keys[key] == 0);
+		assert(value == key * 918);
+		keys[key] = 1;
+	}
+
+	for (int i = 0; i < 100; i++) {
+		assert(keys[i] == 1);
+	}
+
+	memset(keys, 0, sizeof(keys));
+	int count = 0;
+
+	sc_map_foreach (&map, key, value) {
+		assert(keys[key] == 0);
+		assert(value == key * 918);
+		keys[key] = 1;
+		count++;
+		if (count == 76) {
+			break;
+		}
+	}
+
+	for (int i = 0; i < 100; i++) {
+		if (keys[i] == 1) {
+			count--;
+		}
+	}
+	assert(count == 0);
+
+
+
+	count = 0;
+	memset(keys, 0, sizeof(keys));
+
+	sc_map_foreach_key (&map, key) {
+		assert(keys[key] == 0);
+		keys[key] = 1;
+		count++;
+		if (count == 47) {
+			break;
+		}
+	}
+
+	for (int i = 0; i < 100; i++) {
+		if (keys[i] == 1) {
+			count--;
+		}
+	}
+	assert(count == 0);
+
+
+
+	count = 0;
+	memset(keys, 0, sizeof(keys));
+
+	sc_map_foreach_value(&map, value) {
+		assert(keys[value / 918] == 0);
+		keys[value / 918] = 1;
+		count++;
+		if (count == 39) {
+			break;
+		}
+	}
+
+	for (int i = 0; i < 100; i++) {
+		if (keys[i] == 1) {
+			count--;
+		}
+	}
+	assert(count == 0);
+	sc_map_term_64(&map);
+}
+
 #ifdef SC_HAVE_WRAP
 
 bool fail_calloc = false;
@@ -1276,7 +1494,7 @@ void *__wrap_calloc(size_t n, size_t size)
 	return __real_calloc(n, size);
 }
 
-void fail_test_32()
+void fail_test_32(void)
 {
 	struct sc_map_32 map;
 
@@ -1303,7 +1521,7 @@ void fail_test_32()
 	sc_map_term_32(&map);
 }
 
-void fail_test_64()
+void fail_test_64(void)
 {
 	struct sc_map_64 map;
 
@@ -1330,7 +1548,7 @@ void fail_test_64()
 	sc_map_term_64(&map);
 }
 
-void fail_test_64v()
+void fail_test_64v(void)
 {
 	struct sc_map_64v map;
 
@@ -1357,7 +1575,7 @@ void fail_test_64v()
 	sc_map_term_64v(&map);
 }
 
-void fail_test_64s()
+void fail_test_64s(void)
 {
 	struct sc_map_64s map;
 
@@ -1384,7 +1602,7 @@ void fail_test_64s()
 	sc_map_term_64s(&map);
 }
 
-void fail_test_str()
+void fail_test_str(void)
 {
 	struct sc_map_str map;
 	const char *v;
@@ -1424,7 +1642,7 @@ void fail_test_str()
 	sc_map_term_str(&map);
 }
 
-void fail_test_sv()
+void fail_test_sv(void)
 {
 	struct sc_map_sv map;
 	const char *v;
@@ -1463,7 +1681,7 @@ void fail_test_sv()
 	sc_map_term_sv(&map);
 }
 
-void fail_test_s64()
+void fail_test_s64(void)
 {
 	struct sc_map_s64 map;
 	const char *v;
@@ -1526,7 +1744,7 @@ void fail_test_s64(void)
 }
 #endif
 
-int main()
+int main(void)
 {
 	example();
 	example_int_to_str();
@@ -1551,6 +1769,10 @@ int main()
 	test_str();
 	test_sv();
 	test_s64();
+	test_loop_foreach();
+	test_loop_foreach_key();
+	test_loop_foreach_value();
+	test_loop_generic();
 
 	return 0;
 }

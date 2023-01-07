@@ -31,6 +31,7 @@ struct sc_thread {
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 struct sc_thread {
@@ -151,6 +152,27 @@ int sc_thread_term(struct sc_thread *thread)
 	return sc_thread_join(thread, NULL);
 }
 
+int sc_time_sleep(uint64_t millis)
+{
+#if defined(_WIN32) || defined(_WIN64)
+	Sleep((DWORD) millis);
+	return 0;
+#else
+	int rc;
+	struct timespec t, rem;
+
+	rem.tv_sec = (time_t) millis / 1000;
+	rem.tv_nsec = (long) (millis % 1000) * 1000000;
+
+	do {
+		t = rem;
+		rc = nanosleep(&t, &rem);
+	} while (rc != 0 && errno == EINTR);
+
+	return rc;
+#endif
+}
+
 void *server_ip4(void *arg)
 {
 	(void) arg;
@@ -207,7 +229,7 @@ void *client_ip4(void *arg)
 	return NULL;
 }
 
-void test_ip4()
+void test_ip4(void)
 {
 	struct sc_thread thread1;
 	struct sc_thread thread2;
@@ -267,7 +289,7 @@ void *client_ip6(void *arg)
 	return NULL;
 }
 
-void test_ip6()
+void test_ip6(void)
 {
 	struct sc_thread thread1;
 	struct sc_thread thread2;
@@ -335,7 +357,7 @@ void *client_unix(void *arg)
 	return NULL;
 }
 
-void test_unix()
+void test_unix(void)
 {
 	struct sc_thread thread1;
 	struct sc_thread thread2;
@@ -350,7 +372,7 @@ void test_unix()
 	assert(sc_thread_term(&thread2) == 0);
 }
 
-void test1()
+void test1(void)
 {
 	int rc;
 	char tmp[5];
@@ -413,7 +435,6 @@ void test_poll_mass(void)
 		assert(sc_sock_pipe_term(&pipe[i]) == 0);
 		assert(sc_sock_pipe_term(&pipe[i]) == 0);
 	}
-	assert(poll.count == 0);
 	assert(sc_sock_poll_term(&poll) == 0);
 	assert(sc_sock_poll_term(&poll) == 0);
 
@@ -432,7 +453,6 @@ void test_poll_mass(void)
 		assert(sc_sock_pipe_term(&pipe[i]) == 0);
 		assert(sc_sock_pipe_term(&pipe[i]) == 0);
 	}
-	assert(poll.count == 0);
 	assert(sc_sock_poll_term(&poll) == 0);
 
 	assert(sc_sock_poll_init(&poll) == 0);
@@ -450,7 +470,6 @@ void test_poll_mass(void)
 		assert(sc_sock_pipe_term(&pipe[i]) == 0);
 		assert(sc_sock_pipe_term(&pipe[i]) == 0);
 	}
-	assert(poll.count == 0);
 	assert(sc_sock_poll_term(&poll) == 0);
 	assert(sc_sock_poll_term(&poll) == 0);
 
@@ -467,7 +486,6 @@ void test_poll_mass(void)
 					NULL) == 0);
 		assert(sc_sock_pipe_term(&pipe[i]) == 0);
 	}
-	assert(poll.count == 0);
 	assert(sc_sock_poll_term(&poll) == 0);
 }
 
@@ -835,13 +853,10 @@ int __wrap_getsockname(int fd, struct sockaddr *addr, socklen_t *len)
 	return __real_getsockname(fd, addr, len);
 }
 
-void poll_fail_test()
+void poll_fail_test(void)
 {
-	bool fail;
-	int i;
 	struct sc_sock sock;
 	struct sc_sock_poll poll;
-	struct sc_sock_pipe pipe[301];
 
 	assert(sc_sock_poll_init(&poll) == 0);
 	fail_epoll_wait = 1;
@@ -871,163 +886,9 @@ void poll_fail_test()
 	fail_epollcreate1 = true;
 	assert(sc_sock_poll_init(&poll) == -1);
 	fail_epollcreate1 = false;
-
-	assert(sc_sock_poll_init(&poll) == 0);
-	fail = false;
-	fail_realloc = true;
-	for (i = 0; i < 200; i++) {
-		assert(sc_sock_pipe_init(&pipe[i], 0) == 0);
-		fail = sc_sock_poll_add(&poll, &pipe[i].fdt, SC_SOCK_READ,
-					NULL);
-		if (fail) {
-			break;
-		}
-	}
-	assert(fail);
-	for (int j = 0; j <= i; j++) {
-		assert(sc_sock_poll_del(&poll, &pipe[j].fdt, SC_SOCK_READ,
-					NULL) == 0);
-		assert(sc_sock_pipe_term(&pipe[j]) == 0);
-	}
-	assert(poll.count == 0);
-	assert(sc_sock_poll_term(&poll) == 0);
-	fail_realloc = false;
-
-	assert(sc_sock_poll_init(&poll) == 0);
-	fail = false;
-	fail_realloc = true;
-	for (i = 0; i < 200; i++) {
-		assert(sc_sock_pipe_init(&pipe[i], 0) == 0);
-		fail = sc_sock_poll_add(&poll, &pipe[i].fdt,
-					SC_SOCK_READ | SC_SOCK_WRITE, NULL);
-		if (fail) {
-			break;
-		}
-	}
-	assert(fail);
-	for (int j = 0; j <= i; j++) {
-		assert(sc_sock_poll_del(&poll, &pipe[j].fdt,
-					SC_SOCK_READ | SC_SOCK_WRITE,
-					NULL) == 0);
-		assert(sc_sock_pipe_term(&pipe[j]) == 0);
-	}
-	assert(poll.count == 0);
-	assert(sc_sock_poll_term(&poll) == 0);
-	fail_realloc = false;
-
-	assert(sc_sock_poll_init(&poll) == 0);
-	fail = false;
-	fail_realloc = true;
-	for (i = 0; i < 200; i++) {
-		assert(sc_sock_pipe_init(&pipe[i], 0) == 0);
-		fail = sc_sock_poll_add(&poll, &pipe[i].fdt, SC_SOCK_WRITE,
-					NULL);
-		if (fail) {
-			break;
-		}
-	}
-	assert(fail);
-	for (int j = 0; j <= i; j++) {
-		assert(sc_sock_poll_del(&poll, &pipe[j].fdt, SC_SOCK_WRITE,
-					NULL) == 0);
-		assert(sc_sock_pipe_term(&pipe[j]) == 0);
-	}
-	assert(poll.count == 0);
-	assert(sc_sock_poll_term(&poll) == 0);
-	fail_realloc = false;
-
-	assert(sc_sock_poll_init(&poll) == 0);
-	fail = false;
-	fail_realloc = true;
-	for (i = 0; i < 200; i++) {
-		assert(sc_sock_pipe_init(&pipe[i], 0) == 0);
-		fail = sc_sock_poll_add(&poll, &pipe[i].fdt,
-					SC_SOCK_READ | SC_SOCK_WRITE, NULL);
-		if (fail) {
-			break;
-		}
-	}
-	assert(fail);
-	for (int j = 0; j <= i; j++) {
-		assert(sc_sock_poll_del(&poll, &pipe[j].fdt, SC_SOCK_READ,
-					NULL) == 0);
-		assert(sc_sock_poll_del(&poll, &pipe[j].fdt, SC_SOCK_WRITE,
-					NULL) == 0);
-		assert(sc_sock_pipe_term(&pipe[j]) == 0);
-	}
-	assert(poll.count == 0);
-	assert(sc_sock_poll_term(&poll) == 0);
-	fail_realloc = false;
-
-	assert(sc_sock_poll_init(&poll) == 0);
-	fail = false;
-	fail_realloc = true;
-	for (i = 0; i < 200; i++) {
-		assert(sc_sock_pipe_init(&pipe[i], 0) == 0);
-		fail = sc_sock_poll_add(&poll, &pipe[i].fdt,
-					SC_SOCK_READ | SC_SOCK_WRITE, NULL);
-		if (fail) {
-			break;
-		}
-	}
-	assert(fail);
-	for (int j = 0; j <= i; j++) {
-		assert(sc_sock_poll_del(&poll, &pipe[j].fdt, SC_SOCK_WRITE,
-					NULL) == 0);
-		assert(sc_sock_poll_del(&poll, &pipe[j].fdt, SC_SOCK_READ,
-					NULL) == 0);
-		assert(sc_sock_pipe_term(&pipe[j]) == 0);
-	}
-	assert(poll.count == 0);
-	assert(sc_sock_poll_term(&poll) == 0);
-	fail_realloc = false;
-
-	assert(sc_sock_poll_init(&poll) == 0);
-	fail = false;
-	fail_realloc = true;
-	for (i = 0; i < 200; i++) {
-		assert(sc_sock_pipe_init(&pipe[i], 0) == 0);
-		fail = sc_sock_poll_add(&poll, &pipe[i].fdt,
-					SC_SOCK_READ | SC_SOCK_WRITE, NULL);
-		if (fail) {
-			break;
-		}
-		assert(sc_sock_poll_add(&poll, &pipe[i].fdt,
-					SC_SOCK_READ | SC_SOCK_WRITE,
-					NULL) == 0);
-	}
-	assert(fail);
-	for (int j = 0; j <= i; j++) {
-		assert(sc_sock_poll_del(&poll, &pipe[j].fdt, SC_SOCK_WRITE,
-					NULL) == 0);
-		assert(sc_sock_poll_del(&poll, &pipe[j].fdt, SC_SOCK_READ,
-					NULL) == 0);
-		assert(sc_sock_pipe_term(&pipe[j]) == 0);
-	}
-	assert(poll.count == 0);
-	assert(sc_sock_poll_term(&poll) == 0);
-	fail_realloc = false;
-
-	assert(sc_sock_poll_init(&poll) == 0);
-	for (i = 0; i < SC_SIZE_MAX + 1; i++) {
-		assert(sc_sock_pipe_init(&pipe[i], 0) == 0);
-		fail = sc_sock_poll_add(&poll, &pipe[i].fdt, SC_SOCK_READ,
-					NULL);
-		if (fail) {
-			break;
-		}
-	}
-	assert(fail);
-	for (int j = 0; j <= i; j++) {
-		assert(sc_sock_poll_del(&poll, &pipe[j].fdt, SC_SOCK_READ,
-					NULL) == 0);
-		assert(sc_sock_pipe_term(&pipe[j]) == 0);
-	}
-	assert(poll.count == 0);
-	assert(sc_sock_poll_term(&poll) == 0);
 }
 
-void pipe_fail_test()
+void pipe_fail_test(void)
 {
 	struct sc_sock_pipe pipe;
 	fail_pipe = true;
@@ -1062,7 +923,7 @@ void pipe_fail_test()
 	fail_read_errno = 0;
 }
 
-void sock_fail_test()
+void sock_fail_test(void)
 {
 	struct sc_sock sock;
 	struct sc_sock sock2;
@@ -1162,7 +1023,7 @@ void sock_fail_test()
 	fail_socket = 0;
 }
 
-void sock_fail_test2()
+void sock_fail_test2(void)
 {
 	int rc;
 	struct sc_sock sock, client, in;
@@ -1281,7 +1142,7 @@ void sock_fail_test2()
 	assert(sc_sock_term(&client) == 0);
 }
 
-void sock_fail_test3()
+void sock_fail_test3(void)
 {
 	struct sc_sock client;
 	struct sc_sock_poll poll;
@@ -1351,7 +1212,7 @@ void sock_fail_test3()
 	sc_sock_init(&client, 0, false, SC_SOCK_INET);
 	fail_connect_err = EAGAIN;
 	fail_connect = -1;
-	assert(sc_sock_connect(&client, "127.0.0.1", "8080", NULL, NULL) ==-1);
+	assert(sc_sock_connect(&client, "127.0.0.1", "8080", NULL, NULL) == -1);
 	assert(errno == EAGAIN);
 
 	fail_connect_err = 0;
@@ -1404,20 +1265,20 @@ void sock_fail_test3()
 }
 
 #else
-void sock_fail_test()
+void sock_fail_test(void)
 {
 }
-void sock_fail_test2()
+void sock_fail_test2(void)
 {
 }
-void sock_fail_test3()
+void sock_fail_test3(void)
 {
 }
-void poll_fail_test()
+void poll_fail_test(void)
 {
 }
 
-void pipe_fail_test()
+void pipe_fail_test(void)
 {
 }
 
@@ -1426,7 +1287,8 @@ void pipe_fail_test()
 void *server(void *arg)
 {
 	(void) arg;
-	int wr = 2, ev;
+	uint32_t ev;
+	int wr = 2;
 	int rc, received = 0;
 	struct sc_sock srv, in, *sock;
 	struct sc_sock_poll p;
@@ -1446,7 +1308,7 @@ void *server(void *arg)
 
 	while (!done) {
 		int count = sc_sock_poll_wait(&p, -1);
-		assert(rc != -1);
+		assert(count != -1);
 
 		for (int i = 0; i < count; i++) {
 			ev = sc_sock_poll_event(&p, i);
@@ -1552,7 +1414,7 @@ void *client(void *arg)
 	return NULL;
 }
 
-void test_poll()
+void test_poll(void)
 {
 	struct sc_thread thread1;
 	struct sc_thread thread2;
@@ -1567,7 +1429,516 @@ void test_poll()
 	assert(sc_thread_term(&thread2) == 0);
 }
 
-void test_err()
+void check_poll_empty(struct sc_sock_poll *p, int timeout)
+{
+	sc_time_sleep(50);
+	int count = sc_sock_poll_wait(p, timeout);
+	assert(count >= 0);
+
+	for (int i = 0; i < count; i++) {
+		assert(0 == sc_sock_poll_event(p, i));
+	}
+}
+
+void test_poll_edge(void)
+{
+	uint32_t ev;
+	int rc, count, found, timeout = 1;
+	struct sc_sock srv, clt, acc, *sock;
+	struct sc_sock_poll p;
+
+	rc = sc_sock_poll_init(&p);
+	assert(rc == 0);
+
+	sc_sock_init(&srv, 0, false, SC_SOCK_INET);
+	rc = sc_sock_listen(&srv, "127.0.0.1", "11000");
+	assert(rc == 0);
+
+	rc = sc_sock_poll_add(&p, &srv.fdt, SC_SOCK_READ, &srv);
+	assert(rc == 0);
+
+	check_poll_empty(&p, timeout);
+
+	sc_sock_init(&clt, 0, false, SC_SOCK_INET);
+	rc = sc_sock_connect(&clt, "127.0.0.1", "11000", NULL, NULL);
+	if (rc == -1) {
+		assert(errno == EAGAIN);
+	} else {
+		assert(rc == 0);
+	}
+
+	rc = sc_sock_poll_add(&p, &clt.fdt,
+			      SC_SOCK_READ | SC_SOCK_WRITE | SC_SOCK_EDGE,
+			      &clt);
+	assert(rc == 0);
+
+	sc_time_sleep(50);
+	count = sc_sock_poll_wait(&p, timeout);
+	assert(count >= 2);
+	found = 0;
+
+	for (int i = 0; i < count; i++) {
+		ev = sc_sock_poll_event(&p, i);
+		sock = sc_sock_poll_data(&p, i);
+
+		if (ev == 0) {
+			continue;
+		}
+
+		if (sock == &srv) {
+			if (ev & SC_SOCK_READ) {
+				rc = sc_sock_accept(&srv, &acc);
+				assert(rc == 0);
+			}
+
+			if (ev & SC_SOCK_WRITE) {
+				assert(false);
+			}
+			found++;
+		} else if (sock == &clt) {
+			if (ev & SC_SOCK_WRITE) {
+				rc = sc_sock_finish_connect(&clt);
+				assert(rc == 0);
+			}
+
+			if (ev & SC_SOCK_READ) {
+				assert(false);
+			}
+			found++;
+		} else {
+			assert(false);
+		}
+	}
+	assert(found == 2);
+
+	rc = sc_sock_poll_add(&p, &acc.fdt,
+			      SC_SOCK_READ | SC_SOCK_WRITE | SC_SOCK_EDGE,
+			      &acc);
+	assert(rc == 0);
+
+	sc_time_sleep(50);
+	count = sc_sock_poll_wait(&p, timeout);
+	assert(count >= 1);
+	found = 0;
+
+	for (int i = 0; i < count; i++) {
+		ev = sc_sock_poll_event(&p, i);
+		sock = sc_sock_poll_data(&p, i);
+
+		if (ev == 0) {
+			continue;
+		}
+
+		assert(sock == &acc);
+		assert(ev == SC_SOCK_WRITE);
+		found++;
+	}
+	assert(found == 1);
+
+	check_poll_empty(&p, timeout);
+
+	int total_w = 0;
+	int total_r = 0;
+
+	for (;;) {
+		int w = sc_sock_send(&acc, "blaBLA", 7, 0);
+		if (w < 0) {
+			assert(errno == EAGAIN);
+			break;
+		}
+
+		total_w += w;
+	}
+	assert(total_w > 0);
+
+	do {
+		sc_time_sleep(50);
+		count = sc_sock_poll_wait(&p, timeout);
+		assert(count >= 1);
+		found = 0;
+
+		for (int i = 0; i < count; i++) {
+			ev = sc_sock_poll_event(&p, i);
+			sock = sc_sock_poll_data(&p, i);
+
+			if (ev == 0) {
+				continue;
+			}
+
+			if (sock == &clt) {
+				assert(ev & SC_SOCK_READ);
+				found++;
+			} else if (sock == &acc) {
+				assert(ev & SC_SOCK_WRITE);
+				found++;
+			} else {
+				assert(false);
+			}
+		}
+		assert(found == 1 || found == 2);
+
+		char rb;
+
+		for (;;) {
+			int r = sc_sock_recv(&clt, &rb, 1, 0);
+			if (r < 0) {
+				assert(errno == EAGAIN);
+				break;
+			}
+
+			total_r += r;
+		}
+	} while (total_r < total_w);
+	assert(total_r == total_w);
+
+	sc_time_sleep(50);
+	count = sc_sock_poll_wait(&p, timeout);
+	assert(count >= 1);
+	found = 0;
+
+	for (int i = 0; i < count; i++) {
+		ev = sc_sock_poll_event(&p, i);
+		sock = sc_sock_poll_data(&p, i);
+
+		if (ev == 0) {
+			continue;
+		}
+
+		assert(sock == &clt || sock == &acc);
+		assert(ev == SC_SOCK_WRITE);
+		found++;
+	}
+	assert(found == 1 || found == 2);
+
+	check_poll_empty(&p, timeout);
+
+	assert(srv.fdt.op == SC_SOCK_READ);
+	assert(sc_sock_poll_del(&p, &srv.fdt, SC_SOCK_READ, NULL) == 0);
+	assert(srv.fdt.op == SC_SOCK_NONE);
+
+	assert(acc.fdt.op == (SC_SOCK_WRITE | SC_SOCK_READ | SC_SOCK_EDGE));
+	assert(sc_sock_poll_del(&p, &acc.fdt, SC_SOCK_READ | SC_SOCK_EDGE,
+				NULL) == 0);
+	assert(acc.fdt.op == SC_SOCK_WRITE);
+	assert(sc_sock_poll_add(&p, &acc.fdt, SC_SOCK_EDGE, NULL) == 0);
+	assert(acc.fdt.op == (SC_SOCK_WRITE | SC_SOCK_EDGE));
+	assert(sc_sock_poll_del(&p, &acc.fdt, SC_SOCK_WRITE, NULL) == 0);
+	assert(acc.fdt.op == SC_SOCK_NONE);
+
+	assert(clt.fdt.op == (SC_SOCK_READ | SC_SOCK_WRITE | SC_SOCK_EDGE));
+	assert(sc_sock_poll_del(&p, &clt.fdt, SC_SOCK_EDGE, NULL) == 0);
+	assert(clt.fdt.op == (SC_SOCK_READ | SC_SOCK_WRITE));
+	assert(sc_sock_poll_del(&p, &clt.fdt, SC_SOCK_READ | SC_SOCK_WRITE,
+				NULL) == 0);
+	assert(clt.fdt.op == SC_SOCK_NONE);
+
+	assert(sc_sock_poll_add(&p, &acc.fdt, SC_SOCK_READ, NULL) == 0);
+	assert(sc_sock_poll_add(&p, &acc.fdt, SC_SOCK_WRITE, NULL) == 0);
+	assert(sc_sock_poll_add(&p, &acc.fdt, SC_SOCK_EDGE, NULL) == 0);
+	assert(acc.fdt.op == (SC_SOCK_READ | SC_SOCK_WRITE | SC_SOCK_EDGE));
+	assert(sc_sock_poll_del(&p, &acc.fdt, SC_SOCK_READ, NULL) == 0);
+	assert(acc.fdt.op == (SC_SOCK_WRITE | SC_SOCK_EDGE));
+
+	assert(sc_sock_term(&srv) == 0);
+	assert(sc_sock_term(&acc) == 0);
+	assert(sc_sock_term(&clt) == 0);
+	assert(sc_sock_poll_term(&p) == 0);
+}
+
+struct poll_and_sock {
+	struct sc_sock_poll *poll;
+	struct sc_sock *clt;
+	bool visited;
+	int index;
+};
+
+void *client_poll_add(void *arg)
+{
+	int rc;
+
+	struct poll_and_sock *ps = (struct poll_and_sock *) arg;
+	struct sc_sock_poll *poll = ps->poll;
+
+	ps->clt = sc_sock_malloc(sizeof(struct sc_sock));
+
+	sc_sock_init(ps->clt, 0, false, SC_SOCK_INET);
+	rc = sc_sock_connect(ps->clt, "127.0.0.1", "11000", NULL, NULL);
+	if (rc == -1) {
+		assert(errno == EAGAIN);
+	}
+
+	// Sleep to make sure we started waiting on sc_sock_poll_wait() in the
+	// main thread.
+	sc_time_sleep(1000);
+
+	rc = sc_sock_poll_add(poll, &ps->clt->fdt, SC_SOCK_READ | SC_SOCK_WRITE,
+			      ps);
+	assert(rc == 0);
+
+	return poll;
+}
+
+void *client_poll_del(void *arg)
+{
+	struct poll_and_sock *ps = (struct poll_and_sock *) arg;
+	struct sc_sock_poll *poll = ps->poll;
+	struct sc_sock *clt = ps->clt;
+	int rc;
+
+	if (ps->index & 1) {
+		// Partial delete.
+		rc = sc_sock_poll_del(poll, &clt->fdt, SC_SOCK_READ, ps);
+		assert(rc == 0);
+
+		if ((ps->index >> 1) & 1) {
+			// Add again.
+			rc = sc_sock_poll_add(poll, &clt->fdt, SC_SOCK_READ,
+					      ps);
+			assert(rc == 0);
+		}
+	}
+
+	// Full delete.
+	rc = sc_sock_poll_del(poll, &clt->fdt, SC_SOCK_READ | SC_SOCK_WRITE,
+			      NULL);
+	assert(rc == 0);
+
+	assert(clt->fdt.op == SC_SOCK_NONE);
+	assert(sc_sock_term(clt) == 0);
+
+	// Must be able to free fdt right after successful full delete from
+	// poll.
+	sc_sock_free(clt);
+	ps->clt = NULL;
+
+	return poll;
+}
+
+void test_poll_threadsafe(void)
+{
+	enum
+	{
+		THREAD_COUNT = 100
+	};
+	uint32_t ev;
+	int rc, count, added = 0;
+
+	struct sc_sock srv;
+	struct sc_sock_poll poll;
+
+	struct poll_and_sock pss[THREAD_COUNT];
+	struct poll_and_sock *ps;
+
+	int accepted = 0;
+	struct sc_sock acc[THREAD_COUNT];
+
+	struct sc_thread add_thread[THREAD_COUNT];
+	struct sc_thread del_thread[THREAD_COUNT];
+
+	rc = sc_sock_poll_init(&poll);
+	assert(rc == 0);
+
+	sc_sock_init(&srv, 0, false, SC_SOCK_INET);
+	rc = sc_sock_listen(&srv, "127.0.0.1", "11000");
+	assert(rc == 0);
+
+	// Check that we are actually non-blocking.
+	rc = sc_sock_accept(&srv, acc);
+	assert(rc != 0);
+	assert(errno == EAGAIN);
+	printf("server socket ready \n");
+
+	for (int i = 0; i < THREAD_COUNT; i++) {
+		pss[i] = (struct poll_and_sock){
+			.poll = &poll,
+			.index = i,
+		};
+		sc_thread_init(&add_thread[i]);
+		sc_thread_init(&del_thread[i]);
+	}
+
+	for (int i = 0; i < THREAD_COUNT; i++) {
+		rc = sc_thread_start(&add_thread[i], client_poll_add, &pss[i]);
+		assert(rc == 0);
+	}
+	printf("add-threads started \n");
+
+	while (added < THREAD_COUNT) {
+		count = sc_sock_poll_wait(&poll, 7200000);
+
+		if (count < 0) {
+			printf("poll err: %s \n", sc_sock_poll_err(&poll));
+			assert(count >= 0);
+		}
+
+		for (int i = 0; i < count; i++) {
+			if (sc_sock_accept(&srv, &acc[accepted]) == 0) {
+				accepted++;
+			}
+
+			ev = sc_sock_poll_event(&poll, i);
+			ps = sc_sock_poll_data(&poll, i);
+
+			assert(ps != NULL);
+
+			if (ev == 0 || ps->visited) {
+				continue;
+			}
+
+			assert((ev & SC_SOCK_READ) == 0);
+			assert(ev & SC_SOCK_WRITE);
+
+			ps->visited = true;
+			rc = sc_thread_start(&del_thread[added++],
+					     client_poll_del, ps);
+			assert(rc == 0);
+		}
+	}
+	printf("added sockets: %d \n", added);
+	assert(added == THREAD_COUNT);
+
+	for (int i = 0; i < THREAD_COUNT; i++) {
+		assert(pss[i].visited);
+	}
+
+	for (int i = 0; i < THREAD_COUNT; i++) {
+		void *thread_result;
+		rc = sc_thread_join(&add_thread[i], &thread_result);
+		assert(rc == 0);
+		assert(thread_result == &poll);
+	}
+	printf("add-threads joined \n");
+
+	for (int i = 0; i < THREAD_COUNT; i++) {
+		void *thread_result;
+		rc = sc_thread_join(&del_thread[i], &thread_result);
+		assert(rc == 0);
+		assert(thread_result == &poll);
+	}
+	printf("del-threads joined \n");
+
+	for (int i = 0; i < accepted; i++) {
+		assert(sc_sock_term(&acc[i]) == 0);
+	}
+
+	assert(sc_sock_term(&srv) == 0);
+
+#if defined(_WIN32) || defined(_WIN64)
+	assert(!poll.polling);
+	assert(poll.count == 1);
+	assert(poll.ops_cap > 0);
+	assert(poll.ops_count == 0);
+#endif
+
+	assert(sc_sock_poll_term(&poll) == 0);
+	assert(poll.events == NULL);
+}
+
+void *multithreaded_accept(void *arg)
+{
+	struct sc_sock_poll *poll = (struct sc_sock_poll *) arg;
+	struct sc_sock acc;
+
+	int n = sc_sock_poll_wait(poll, 2000);
+	printf("poll %d \n", n);
+
+	if (n == 0) {
+		return poll;
+	}
+
+	assert(n == 1);
+
+	enum sc_sock_ev ev = sc_sock_poll_event(poll, 0);
+	assert(ev == SC_SOCK_READ);
+
+	struct sc_sock *srv = sc_sock_poll_data(poll, 0);
+	assert(srv != NULL);
+
+	int rc = sc_sock_accept(srv, &acc);
+
+	if (rc == 0) {
+		rc = sc_sock_term(&acc);
+		assert(rc == 0);
+		return srv;
+	}
+
+	assert(rc == -1);
+	assert(errno == EAGAIN);
+	return poll;
+}
+
+void test_poll_multithreaded_accept(void)
+{
+	enum
+	{
+		THREAD_COUNT = 8
+	};
+
+	int rc;
+
+	struct sc_sock_poll polls[THREAD_COUNT];
+	struct sc_thread threads[THREAD_COUNT];
+
+	struct sc_sock srv, clt;
+	sc_sock_init(&srv, 0, false, SC_SOCK_INET);
+	rc = sc_sock_listen(&srv, "127.0.0.1", "11000");
+	assert(rc == 0);
+
+	for (int i = 0; i < THREAD_COUNT; i++) {
+		sc_thread_init(&threads[i]);
+
+		rc = sc_sock_poll_init(&polls[i]);
+		assert(rc == 0);
+
+		srv.fdt.op = SC_SOCK_NONE;
+
+		rc = sc_sock_poll_add(&polls[i], &srv.fdt, SC_SOCK_READ, &srv);
+		assert(rc == 0);
+	}
+
+	for (int i = 0; i < THREAD_COUNT; i++) {
+		rc = sc_thread_start(&threads[i], multithreaded_accept, &polls[i]);
+		assert(rc == 0);
+	}
+
+	sc_time_sleep(500);
+
+	sc_sock_init(&clt, 0, true, SC_SOCK_INET);
+	rc = sc_sock_connect(&clt, "127.0.0.1", "11000", NULL, NULL);
+	assert(rc == 0);
+
+	printf("client connected \n");
+
+	int accepted = 0;
+
+	for (int i = 0; i < THREAD_COUNT; i++) {
+		void *thread_result;
+		rc = sc_thread_join(&threads[i], &thread_result);
+		assert(rc == 0);
+
+		if (thread_result == &srv) {
+			accepted++;
+		} else {
+			assert(thread_result == &polls[i]);
+		}
+	}
+
+	printf("accepted %d \n", accepted);
+	assert(accepted == 1);
+
+	rc = sc_sock_term(&clt);
+	assert(rc == 0);
+
+	for (int i = 0; i < THREAD_COUNT; i++) {
+		rc = sc_sock_poll_term(&polls[i]);
+		assert(rc == 0);
+	}
+
+	rc = sc_sock_term(&srv);
+	assert(rc == 0);
+}
+
+void test_err(void)
 {
 	struct sc_sock sock;
 	char buf[128];
@@ -1606,7 +1977,7 @@ void test_err()
 	assert(*sc_sock_poll_err(&p) != '\0');
 }
 
-int main()
+int main(void)
 {
 #ifdef SC_HAVE_WRAP
 	assert(sc_mutex_init(&mutex) == 0);
@@ -1633,6 +2004,9 @@ int main()
 	test_poll();
 	test_err();
 	test_poll_mass();
+	test_poll_edge();
+	test_poll_threadsafe();
+	test_poll_multithreaded_accept();
 
 	assert(sc_sock_cleanup() == 0);
 
